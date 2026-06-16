@@ -16,7 +16,7 @@ grep -Fq '已恢复客户端' "$ROOT/scripts/wireguard.sh" ||
   fail "WireGuard peer removal lacks rollback"
 [[ "$(grep -c 'run ipsec restart' "$ROOT/scripts/ipsec.sh")" -ge 2 ]] ||
   fail "IPsec credential changes do not terminate active sessions"
-for script in ipsec openvpn wireguard; do
+for script in ipsec l2tp openvpn wireguard; do
   grep -Fq 'ensure_bootstrap' "$ROOT/scripts/${script}.sh" ||
     fail "$script lacks dependency bootstrap"
 done
@@ -48,5 +48,9 @@ grep -Fq 'Caddy 新配置重载失败，已恢复原配置' "$ROOT/scripts/caddy
   fail "Caddy reload failure lacks rollback"
 grep -Fq '127.0.0.1:9100' "$ROOT/scripts/node-exporter.sh" ||
   fail "Node Exporter does not default to local-only metrics"
+grep -Fq -- '-m policy --dir in --pol ipsec' "$ROOT/scripts/l2tp.sh" ||
+  fail "L2TP UDP 1701 is not restricted to IPsec policy"
+grep -Fq 'chmod 600 "$file"' "$ROOT/scripts/l2tp.sh" ||
+  fail "L2TP PPP secrets are not protected"
 
 echo "Security regression tests passed"

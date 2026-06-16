@@ -287,6 +287,38 @@ sudo ./node-exporter.sh uninstall
 
 指标接口通常不应直接暴露到公网；建议通过 UFW、云安全组或内网地址限制访问。
 
+
+## Ubuntu 一键部署 L2TP/IPsec
+
+L2TP/IPsec 兼容许多旧设备和系统内置客户端。脚本会安装 strongSwan、xl2tpd 和 ppp，
+生成预共享密钥、PPP 用户、NAT/转发规则和 systemd 防火墙服务：
+
+```bash
+curl -fsSLO https://raw.githubusercontent.com/laman-heredia/Easy-Install/main/scripts/l2tp.sh
+chmod +x l2tp.sh
+sudo ./l2tp.sh --endpoint vpn.example.com --user phone
+```
+
+常用管理命令：
+
+```bash
+# 自定义 PSK、用户密码、地址池和 DNS
+sudo ./l2tp.sh --psk 'a-long-random-psk' --password 'a-long-random-password' \
+  --vpn-cidr 10.20.30.0/24 --client-pool 10.20.30.10-10.20.30.250 \
+  --dns 1.1.1.1,8.8.8.8
+
+# 添加/更新或删除用户
+sudo ./l2tp.sh add --user laptop --password 'another-long-password'
+sudo ./l2tp.sh revoke --user old-phone
+
+sudo ./l2tp.sh list
+sudo ./l2tp.sh status
+sudo ./l2tp.sh uninstall
+```
+
+请在云安全组和外部防火墙放行 UDP 500、4500 和 1701。L2TP/IPsec 主要用于兼容旧客户端，
+安全性和漫游体验通常不如 WireGuard 或 IKEv2；新部署优先考虑更现代的 VPN。
+
 ## Ubuntu 一键部署 WireGuard
 
 WireGuard 配置简单、性能优秀，特别适合手机、笔记本和服务器之间的日常 VPN
