@@ -65,6 +65,78 @@ sudo ./nginx.sh uninstall
 申请证书前，请确保域名已经解析到服务器，且云安全组和防火墙开放 TCP 80/443。
 站点配置会在写入后执行 `nginx -t`，只有配置测试成功才会重新加载服务。
 
+## Ubuntu 一键部署 PostgreSQL
+
+默认安装 Ubuntu 仓库中的 PostgreSQL，并创建 `app` 数据库和独立登录用户：
+
+```bash
+curl -fsSLO https://raw.githubusercontent.com/laman-heredia/Easy-Install/main/scripts/postgresql.sh
+chmod +x postgresql.sh
+sudo ./postgresql.sh
+```
+
+常用操作：
+
+```bash
+# 自定义数据库、用户和密码
+sudo ./postgresql.sh --database production --user appuser \
+  --password 'use-a-long-random-password'
+
+# 创建更多数据库，或更新已有数据库所有者和用户密码
+sudo ./postgresql.sh create --database analytics --user analyst
+sudo ./postgresql.sh create --database production --user appuser \
+  --password 'new-long-random-password' --force
+
+# 生成 pg_dump custom-format 备份
+sudo ./postgresql.sh backup --database production --backup-dir /srv/backups
+
+sudo ./postgresql.sh list
+sudo ./postgresql.sh status
+sudo ./postgresql.sh uninstall
+```
+
+PostgreSQL 默认只监听本机。远程访问必须同时指定监听地址和允许的客户端 CIDR：
+
+```bash
+sudo ./postgresql.sh --listen '*' --allow-cidr 10.10.0.0/16
+```
+
+请同时使用云安全组或防火墙限制 TCP 5432，禁止向整个互联网开放数据库端口。
+卸载默认保留数据库文件；只有 `--purge-data` 才会删除数据。
+
+## Ubuntu 一键部署 Redis
+
+默认只监听 `127.0.0.1` 和 `::1`，启用 protected mode、密码认证和 AOF：
+
+```bash
+curl -fsSLO https://raw.githubusercontent.com/laman-heredia/Easy-Install/main/scripts/redis.sh
+chmod +x redis.sh
+sudo ./redis.sh
+```
+
+常用配置：
+
+```bash
+# 设置密码、内存上限和淘汰策略
+sudo ./redis.sh --password 'a-long-random-secret' \
+  --maxmemory 512mb --policy allkeys-lru
+
+# 测试认证
+sudo ./redis.sh test --password 'a-long-random-secret'
+sudo ./redis.sh status --password 'a-long-random-secret'
+
+# 默认保留数据；显式指定才删除
+sudo ./redis.sh uninstall
+sudo ./redis.sh uninstall --purge-data
+```
+
+不建议把 Redis 暴露到公网。如果确实需要远程访问，必须显式使用 `--remote` 和至少
+16 字符密码，并通过云安全组或防火墙仅允许可信 CIDR 访问 TCP 6379：
+
+```bash
+sudo ./redis.sh --remote --password 'very-long-random-secret'
+```
+
 ## Ubuntu 一键部署 WireGuard
 
 WireGuard 配置简单、性能优秀，特别适合手机、笔记本和服务器之间的日常 VPN
