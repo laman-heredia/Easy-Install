@@ -75,7 +75,7 @@ Ubuntu WireGuard 一键部署与管理
   --allowed-ips LIST         自定义客户端 AllowedIPs（逗号分隔）
   --mtu MTU                  接口 MTU（默认 1420）
   --keepalive SECONDS        客户端保活间隔（默认 25，0 为关闭）
-  --force                    覆盖已有安装或同名客户端
+  --force                    强制重装已有服务（不会覆盖同名客户端）
   --keep-keys                卸载时保留密钥和客户端资料
   --dry-run                  仅展示安装命令，不修改系统
   --verbose                  显示详细执行过程
@@ -119,14 +119,38 @@ validate() {
   [[ "$CLIENT_NAME" =~ ^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$ ]] || die "客户端名格式无效，最长 64 字符。"
   [[ -z "$ENDPOINT" || "$ENDPOINT" =~ ^[A-Za-z0-9_.:-]+$ ]] || die "公网入口只能是 IP 地址或域名。"
   if [[ ! "$PORT" =~ ^[0-9]+$ ]] || ((PORT < 1 || PORT > 65535)); then die "端口必须在 1-65535 之间。"; fi
-  [[ "$VPN_SUBNET" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}/([8-9]|[12][0-9]|30)$ ]] || die "IPv4 网段必须是 /8 到 /30 的 CIDR。"
-  [[ "$IPV6_SUBNET" =~ ^[A-Fa-f0-9:]+/([0-9]|[1-9][0-9]|1[01][0-9]|12[0-6])$ ]] || die "IPv6 网段必须是 /0 到 /126 的 CIDR。"
+  valid_network "$VPN_SUBNET" 4 || die "IPv4 网段必须是规范的 /8 到 /30 网络 CIDR。"
+  [[ "$VPN_SUBNET" =~ /([8-9]|[12][0-9]|30)$ ]] || die "IPv4 网段前缀必须在 /8 到 /30 之间。"
+  valid_network "$IPV6_SUBNET" 6 || die "IPv6 网段必须是规范的 /0 到 /126 网络 CIDR。"
   [[ "$DNS_MODE" =~ ^(cloudflare|google|quad9|system|custom)$ ]] || die "不支持的 DNS 模式。"
   [[ "$DNS_MODE" != custom || -n "$CUSTOM_DNS" ]] || die "--dns custom 需要 --custom-dns。"
   [[ "$CUSTOM_DNS" =~ ^[A-Fa-f0-9:.,]*$ ]] || die "自定义 DNS 只能是逗号分隔的 IP 地址。"
-  [[ -z "$ALLOWED_IPS" || "$ALLOWED_IPS" =~ ^[A-Fa-f0-9:.,/]+$ ]] || die "AllowedIPs 格式无效。"
+  [[ -z "$ALLOWED_IPS" ]] || valid_network_list "$ALLOWED_IPS" || die "AllowedIPs 包含无效 CIDR。"
   if [[ ! "$MTU" =~ ^[0-9]+$ ]] || ((MTU < 576 || MTU > 9000)); then die "MTU 必须在 576-9000 之间。"; fi
   if [[ ! "$KEEPALIVE" =~ ^[0-9]+$ ]] || ((KEEPALIVE < 0 || KEEPALIVE > 65535)); then die "保活间隔必须在 0-65535 秒之间。"; fi
+}
+
+valid_network() {
+  python3 - "$1" "$2" <<'PY'
+import ipaddress, sys
+try:
+    network = ipaddress.ip_network(sys.argv[1], strict=True)
+    assert network.version == int(sys.argv[2])
+    assert network.prefixlen <= network.max_prefixlen - 2
+except (ValueError, AssertionError):
+    raise SystemExit(1)
+PY
+}
+
+valid_network_list() {
+  python3 - "$1" <<'PY'
+import ipaddress, sys
+try:
+    for value in sys.argv[1].split(","):
+        ipaddress.ip_network(value.strip(), strict=False)
+except ValueError:
+    raise SystemExit(1)
+PY
 }
 
 require_root_ubuntu() {
@@ -210,10 +234,12 @@ PY
 }
 
 next_index() {
-  local max=1 file value
+  local file value used=" "
   shopt -s nullglob
-  for file in "$PEERS_DIR"/*.meta; do value="$(awk -F= '$1=="INDEX" {print $2}' "$file")"; ((value > max)) && max="$value"; done
-  echo $((max + 1))
+  for file in "$PEERS_DIR"/*.meta; do value="$(awk -F= '$1=="INDEX" {print $2}' "$file")"; used+="${value} "; done
+  local index=2
+  while [[ "$used" == *" ${index} "* ]]; do ((index++)); done
+  echo "$index"
 }
 
 write_server_config() {
@@ -223,7 +249,7 @@ write_server_config() {
   if [[ "$IPV6" == true ]]; then
     server6="$(ipcalc server "$IPV6_SUBNET")"; prefix6="$(ipcalc prefix "$IPV6_SUBNET")"
     ip6_address=", ${server6}/${prefix6}"
-    ip6_up="PostUp = ip6tables -A FORWARD -i %i -j ACCEPT; ip6tables -A FORWARD -o %i -j ACCEPT; ip6tables -t nat -A POSTROUTING -s ${IPV6_SUBNET} -o ${iface} -j MASQUERADE"
+    ip6_up="PostUp = ip6tables -I FORWARD 1 -i %i -j ACCEPT; ip6tables -I FORWARD 1 -o %i -j ACCEPT; ip6tables -t nat -I POSTROUTING 1 -s ${IPV6_SUBNET} -o ${iface} -j MASQUERADE"
     ip6_down="PostDown = ip6tables -D FORWARD -i %i -j ACCEPT; ip6tables -D FORWARD -o %i -j ACCEPT; ip6tables -t nat -D POSTROUTING -s ${IPV6_SUBNET} -o ${iface} -j MASQUERADE"
   fi
   cat >"$WG_CONF" <<EOF_CONF
@@ -233,7 +259,7 @@ Address = ${server4}/${prefix4}${ip6_address}
 ListenPort = ${PORT}
 PrivateKey = $(cat "$CONFIG_DIR/server.key")
 MTU = ${MTU}
-PostUp = iptables -A INPUT -p udp --dport ${PORT} -j ACCEPT; iptables -A FORWARD -i %i -j ACCEPT; iptables -A FORWARD -o %i -j ACCEPT; iptables -t nat -A POSTROUTING -s ${VPN_SUBNET} -o ${iface} -j MASQUERADE
+PostUp = iptables -I INPUT 1 -p udp --dport ${PORT} -j ACCEPT; iptables -I FORWARD 1 -i %i -j ACCEPT; iptables -I FORWARD 1 -o %i -j ACCEPT; iptables -t nat -I POSTROUTING 1 -s ${VPN_SUBNET} -o ${iface} -j MASQUERADE
 PostDown = iptables -D INPUT -p udp --dport ${PORT} -j ACCEPT; iptables -D FORWARD -i %i -j ACCEPT; iptables -D FORWARD -o %i -j ACCEPT; iptables -t nat -D POSTROUTING -s ${VPN_SUBNET} -o ${iface} -j MASQUERADE
 ${ip6_up}
 ${ip6_down}
@@ -262,25 +288,25 @@ sync_interface() {
 }
 
 create_client() {
-  local meta="$PEERS_DIR/${CLIENT_NAME}.meta" index address4 address6="" private_key public_key client_allowed endpoint_value
-  [[ ! -e "$meta" || "$FORCE" == true ]] || die "客户端 $CLIENT_NAME 已存在；换名称或使用 --force。"
-  [[ ! -e "$meta" ]] || remove_client_files "$CLIENT_NAME"
+  local meta="$PEERS_DIR/${CLIENT_NAME}.meta" index address4 address6="" private_key public_key client_allowed endpoint_value temp_dir
+  [[ ! -e "$meta" ]] || die "客户端 $CLIENT_NAME 已存在。为避免更新失败导致旧配置失效，请先删除同名客户端或使用新名称。"
   index="$(next_index)"
   address4="$(ipcalc client "$VPN_SUBNET" "$index")"
   [[ "$IPV6" == true ]] && address6="$(ipcalc client "$IPV6_SUBNET" "$index")"
+  temp_dir="$(mktemp -d "$CONFIG_DIR/.peer-${CLIENT_NAME}.XXXXXX")"
+  trap 'rm -rf "${temp_dir:-}"' RETURN
   private_key="$(wg genkey)"; public_key="$(printf '%s' "$private_key" | wg pubkey)"
-  printf '%s\n' "$private_key" >"$PEERS_DIR/${CLIENT_NAME}.key"
-  wg genpsk >"$PEERS_DIR/${CLIENT_NAME}.psk"
-  cat >"$meta" <<EOF_META
+  printf '%s\n' "$private_key" >"$temp_dir/key"
+  wg genpsk >"$temp_dir/psk"
+  cat >"$temp_dir/meta" <<EOF_META
 name=$(printf %q "$CLIENT_NAME")
 INDEX=$(printf %q "$index")
 public_key=$(printf %q "$public_key")
 address4=$(printf %q "$address4")
 address6=$(printf %q "$address6")
 EOF_META
-  chmod 600 "$PEERS_DIR/${CLIENT_NAME}.key" "$PEERS_DIR/${CLIENT_NAME}.psk" "$meta"
-  write_server_config; sync_interface
-  if [[ -n "$ALLOWED_IPS" ]]; then client_allowed="$ALLOWED_IPS"; elif [[ "$ROUTE_ALL" == true ]]; then client_allowed="0.0.0.0/0$( [[ "$IPV6" == true ]] && echo ', ::/0' )"; else client_allowed="$VPN_SUBNET$( [[ "$IPV6" == true ]] && printf ', %s' "$IPV6_SUBNET" )"; fi
+  chmod 600 "$temp_dir/key" "$temp_dir/psk" "$temp_dir/meta"
+  if [[ -n "$ALLOWED_IPS" ]]; then client_allowed="$ALLOWED_IPS"; elif [[ "$ROUTE_ALL" == true ]]; then client_allowed="0.0.0.0/0, ::/0"; else client_allowed="$VPN_SUBNET$( [[ "$IPV6" == true ]] && printf ', %s' "$IPV6_SUBNET" )"; fi
   mkdir -p "$OUTPUT_DIR"
   endpoint_value="$ENDPOINT"
   [[ "$endpoint_value" == *:* && "$endpoint_value" != \\[*\\] ]] && endpoint_value="[$endpoint_value]"
@@ -293,7 +319,7 @@ MTU = ${MTU}
 
 [Peer]
 PublicKey = $(cat "$CONFIG_DIR/server.pub")
-PresharedKey = $(cat "$PEERS_DIR/${CLIENT_NAME}.psk")
+PresharedKey = $(cat "$temp_dir/psk")
 Endpoint = ${endpoint_value}:${PORT}
 AllowedIPs = ${client_allowed}
 $( ((KEEPALIVE > 0)) && echo "PersistentKeepalive = ${KEEPALIVE}" )
@@ -301,7 +327,18 @@ EOF_CLIENT
   chmod 600 "$OUTPUT_DIR/${CLIENT_NAME}.conf"
   qrencode -t PNG -o "$OUTPUT_DIR/${CLIENT_NAME}.png" -r "$OUTPUT_DIR/${CLIENT_NAME}.conf"
   chmod 600 "$OUTPUT_DIR/${CLIENT_NAME}.png"
+  install -m 600 "$temp_dir/key" "$PEERS_DIR/${CLIENT_NAME}.key"
+  install -m 600 "$temp_dir/psk" "$PEERS_DIR/${CLIENT_NAME}.psk"
+  install -m 600 "$temp_dir/meta" "$meta"
   install -m 600 "$OUTPUT_DIR/${CLIENT_NAME}.conf" "$PEERS_DIR/${CLIENT_NAME}.conf"
+  write_server_config
+  if ! sync_interface; then
+    remove_client_files "$CLIENT_NAME"
+    write_server_config
+    die "同步 WireGuard 接口失败，已回滚新客户端。"
+  fi
+  rm -rf "$temp_dir"
+  trap - RETURN
   success "客户端配置：$OUTPUT_DIR/${CLIENT_NAME}.conf"
   success "二维码图片：$OUTPUT_DIR/${CLIENT_NAME}.png"
 }
@@ -374,6 +411,7 @@ uninstall_server() {
 
 main() {
   parse_args "$@"; validate
+  [[ "$DRY_RUN" != true || "$COMMAND" == install ]] || die "--dry-run 当前仅支持 install，避免管理命令意外修改密钥。"
   [[ "$VERBOSE" == true ]] && set -x
   case "$COMMAND" in
     install) install_server;; add) add_client;; remove) remove_client;; list) list_clients;;

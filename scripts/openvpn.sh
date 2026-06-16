@@ -87,7 +87,7 @@ Ubuntu OpenVPN 一键部署与管理
   --split-tunnel            不将客户端默认路由导向 VPN
   --compression             启用兼容压缩（不推荐，有安全风险）
   --keep-ca                 卸载时保留 PKI 和客户端资料
-  --force                   覆盖同名客户端/已有安装
+  --force                   强制重装已有服务（不会覆盖同名客户端）
   --dry-run                 仅展示安装命令，不改动系统
   --verbose                 显示详细命令输出
   -h, --help                显示帮助
@@ -132,8 +132,15 @@ validate() {
   [[ "$PROTOCOL" == "udp" || "$PROTOCOL" == "tcp" ]] || die "协议只能是 udp 或 tcp。"
   [[ "$TLS_MODE" == "tls-crypt" || "$TLS_MODE" == "tls-auth" ]] || die "TLS 模式只能是 tls-crypt 或 tls-auth。"
   [[ "$CLIENT_NAME" =~ ^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$ ]] || die "客户端名只能包含字母、数字、点、下划线和连字符，最长 64 字符。"
-  [[ "$VPN_SUBNET" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]] || die "VPN 子网地址格式无效。"
-  [[ "$VPN_NETMASK" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]] || die "VPN 掩码格式无效。"
+  python3 - "$VPN_SUBNET" "$VPN_NETMASK" <<'PY' || die "VPN 子网或掩码无效，且地址必须是网络地址。"
+import ipaddress, sys
+ipaddress.ip_network(f"{sys.argv[1]}/{sys.argv[2]}", strict=True)
+PY
+  python3 - "$IPV6_SUBNET" <<'PY' || die "IPv6 VPN 网段无效，且必须是网络地址。"
+import ipaddress, sys
+network = ipaddress.ip_network(sys.argv[1], strict=True)
+assert network.version == 6 and network.prefixlen <= 126
+PY
   [[ -z "$ENDPOINT" || "$ENDPOINT" =~ ^[A-Za-z0-9_.:-]+$ ]] || die "公网入口只能是 IP 地址或域名。"
   [[ "$CIPHER" =~ ^[A-Za-z0-9_:-]+$ ]] || die "加密套件列表包含无效字符。"
   [[ "$AUTH" =~ ^[A-Za-z0-9_-]+$ ]] || die "认证摘要包含无效字符。"
@@ -150,7 +157,6 @@ require_root_ubuntu() {
   source /etc/os-release
   [[ "${ID:-}" == "ubuntu" ]] || die "当前仅支持 Ubuntu，检测到：${PRETTY_NAME:-未知系统}"
   case "${VERSION_ID:-}" in 20.04|22.04|24.04|26.04) ;; *) warn "Ubuntu ${VERSION_ID:-未知版本} 未经完整验证，将继续尝试。";; esac
-  [[ -c /dev/net/tun ]] || die "未发现 /dev/net/tun；请先在宿主机或 VPS 控制台启用 TUN。"
 }
 
 confirm() {
@@ -242,8 +248,11 @@ write_server_config() {
   [[ "$PROTOCOL" == "udp" ]] && exit_notify="explicit-exit-notify 1"
   [[ "$TLS_MODE" == "tls-crypt" ]] && tls_line="tls-crypt ${TLS_MODE}.key" || tls_line=$'tls-auth tls-auth.key 0\nkey-direction 0'
   [[ "$COMPRESSION" == "true" ]] && compression_lines=$'compress lz4-v2\npush "compress lz4-v2"'
-  [[ "$IPV6" == "true" ]] && ipv6_lines="server-ipv6 ${IPV6_SUBNET}"
-  [[ "$ROUTE_ALL" == "true" ]] && redirect_line='push "redirect-gateway def1 bypass-dhcp"'
+  if [[ "$IPV6" == "true" ]]; then ipv6_lines="server-ipv6 ${IPV6_SUBNET}"; else ipv6_lines='push "block-ipv6"'; fi
+  if [[ "$ROUTE_ALL" == "true" ]]; then
+    redirect_line='push "redirect-gateway def1 bypass-dhcp"'
+    [[ "$IPV6" == "true" ]] && redirect_line+=$'\npush "redirect-gateway ipv6"'
+  fi
   cat >"$SERVER_CONF" <<EOF_SERVER
 port ${PORT}
 proto ${proto}
@@ -293,19 +302,35 @@ EOF_SYSCTL
 set -euo pipefail
 ACTION="\${1:-start}"
 IPT="\$(command -v iptables)"
+IPT6="\$(command -v ip6tables)"
 rule() { "\$IPT" "\$@"; }
-add() { rule -C "\$@" 2>/dev/null || rule -A "\$@"; }
-del() { while rule -C "\$@" 2>/dev/null; do rule -D "\$@"; done; }
+rule6() { "\$IPT6" "\$@"; }
+add() { local table="\$1" chain="\$2"; shift 2; rule -t "\$table" -C "\$chain" "\$@" 2>/dev/null || rule -t "\$table" -I "\$chain" 1 "\$@"; }
+del() { local table="\$1" chain="\$2"; shift 2; while rule -t "\$table" -C "\$chain" "\$@" 2>/dev/null; do rule -t "\$table" -D "\$chain" "\$@"; done; }
+add6() { local table="\$1" chain="\$2"; shift 2; rule6 -t "\$table" -C "\$chain" "\$@" 2>/dev/null || rule6 -t "\$table" -I "\$chain" 1 "\$@"; }
+del6() { local table="\$1" chain="\$2"; shift 2; while rule6 -t "\$table" -C "\$chain" "\$@" 2>/dev/null; do rule6 -t "\$table" -D "\$chain" "\$@"; done; }
 if [[ "\$ACTION" == start ]]; then
-  add INPUT -p ${PROTOCOL} --dport ${PORT} -j ACCEPT
-  add FORWARD -s ${VPN_SUBNET}/${VPN_NETMASK} -j ACCEPT
-  add FORWARD -d ${VPN_SUBNET}/${VPN_NETMASK} -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT
-  add POSTROUTING -t nat -s ${VPN_SUBNET}/${VPN_NETMASK} -o ${iface} -j MASQUERADE
+  add filter INPUT -p ${PROTOCOL} --dport ${PORT} -j ACCEPT
+  add filter FORWARD -s ${VPN_SUBNET}/${VPN_NETMASK} -j ACCEPT
+  add filter FORWARD -d ${VPN_SUBNET}/${VPN_NETMASK} -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT
+  add nat POSTROUTING -s ${VPN_SUBNET}/${VPN_NETMASK} -o ${iface} -j MASQUERADE
+$(if [[ "$IPV6" == "true" ]]; then cat <<EOF_IPV6_START
+  add6 filter FORWARD -s ${IPV6_SUBNET} -j ACCEPT
+  add6 filter FORWARD -d ${IPV6_SUBNET} -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT
+  add6 nat POSTROUTING -s ${IPV6_SUBNET} -o ${iface} -j MASQUERADE
+EOF_IPV6_START
+fi)
 else
-  del INPUT -p ${PROTOCOL} --dport ${PORT} -j ACCEPT
-  del FORWARD -s ${VPN_SUBNET}/${VPN_NETMASK} -j ACCEPT
-  del FORWARD -d ${VPN_SUBNET}/${VPN_NETMASK} -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT
-  del POSTROUTING -t nat -s ${VPN_SUBNET}/${VPN_NETMASK} -o ${iface} -j MASQUERADE
+  del filter INPUT -p ${PROTOCOL} --dport ${PORT} -j ACCEPT
+  del filter FORWARD -s ${VPN_SUBNET}/${VPN_NETMASK} -j ACCEPT
+  del filter FORWARD -d ${VPN_SUBNET}/${VPN_NETMASK} -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT
+  del nat POSTROUTING -s ${VPN_SUBNET}/${VPN_NETMASK} -o ${iface} -j MASQUERADE
+$(if [[ "$IPV6" == "true" ]]; then cat <<EOF_IPV6_STOP
+  del6 filter FORWARD -s ${IPV6_SUBNET} -j ACCEPT
+  del6 filter FORWARD -d ${IPV6_SUBNET} -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT
+  del6 nat POSTROUTING -s ${IPV6_SUBNET} -o ${iface} -j MASQUERADE
+EOF_IPV6_STOP
+fi)
 fi
 EOF_FW
   chmod 700 "$FIREWALL_SCRIPT"
@@ -332,8 +357,7 @@ EOF_UNIT
 
 create_client() {
   local cert="${PKI_DIR}/issued/${CLIENT_NAME}.crt" key="${PKI_DIR}/private/${CLIENT_NAME}.key"
-  [[ ! -e "$cert" || "$FORCE" == "true" ]] || die "客户端 ${CLIENT_NAME} 已存在；换一个名称或使用 --force。"
-  if [[ -e "$cert" ]]; then easyrsa revoke "$CLIENT_NAME" || true; easyrsa gen-crl; fi
+  [[ ! -e "$cert" ]] || die "客户端 ${CLIENT_NAME} 已存在。为避免先吊销后签发失败，请使用新名称轮换证书。"
   log "签发客户端证书：${CLIENT_NAME}"
   easyrsa build-client-full "$CLIENT_NAME" nopass
   install -m 600 "$PKI_DIR/crl.pem" "$SERVER_DIR/crl.pem"
@@ -387,6 +411,7 @@ EOF_CLIENT
 
 install_server() {
   require_root_ubuntu
+  [[ -c /dev/net/tun ]] || die "未发现 /dev/net/tun；请先在宿主机或 VPS 控制台启用 TUN。"
   if [[ -e "$SETTINGS_FILE" && "$FORCE" != "true" ]]; then die "OpenVPN 已由本脚本安装。使用 add 添加客户端，或用 --force 重装。"; fi
   detect_endpoint
   validate
@@ -395,7 +420,12 @@ install_server() {
   confirm "开始安装？" || die "已取消。"
   install_packages
   if [[ "$DRY_RUN" == "true" ]]; then success "演练完成，系统未被修改。"; return; fi
-  [[ ! -d "$PKI_DIR" || "$FORCE" != "true" ]] || rm -rf "$PKI_DIR"
+  if [[ -e "$SETTINGS_FILE" && "$FORCE" == "true" ]]; then
+    systemctl disable --now easy-install-openvpn-firewall.service 2>/dev/null || true
+    if [[ -x "$FIREWALL_SCRIPT" ]]; then "$FIREWALL_SCRIPT" stop || true; fi
+    systemctl disable --now openvpn-server@server.service 2>/dev/null || true
+    rm -rf "$PKI_DIR"
+  fi
   create_pki
   write_server_config
   save_settings
@@ -449,6 +479,7 @@ uninstall_server() {
 main() {
   parse_args "$@"
   validate
+  [[ "$DRY_RUN" != "true" || "$COMMAND" == install ]] || die "--dry-run 当前仅支持 install，避免管理命令意外修改证书。"
   [[ "$VERBOSE" == "true" ]] && set -x
   case "$COMMAND" in
     install) install_server;; add) add_client;; revoke) revoke_client;;

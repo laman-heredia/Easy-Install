@@ -27,6 +27,7 @@ IKE_PROPOSALS="aes256gcm16-aes128gcm16-prfsha384-prfsha256-ecp384-ecp256,aes256-
 ESP_PROPOSALS="aes256gcm16-aes128gcm16-ecp384-ecp256,aes256-sha256"
 CERT_DAYS="3650"
 ROUTE_ALL="true"
+ROUTES=""
 ASSUME_YES="false"
 FORCE="false"
 KEEP_CA="false"
@@ -73,7 +74,8 @@ Ubuntu IKEv2/IPsec 一键部署与管理（strongSwan）
   --ike PROPOSALS            strongSwan IKE 加密提议
   --esp PROPOSALS            strongSwan ESP 加密提议
   --cert-days DAYS           CA/服务端证书有效天数（默认 3650）
-  --split-tunnel             只路由 VPN 地址池（需客户端另配业务路由）
+  --split-tunnel             启用分流模式（必须同时指定 --routes）
+  --routes CIDR[,CIDR]       分流模式下通过 VPN 访问的服务端网段
   --force                    覆盖已有安装或更新同名账号
   --keep-ca                  卸载时保留 CA、账号和导出资料
   --dry-run                  展示安装命令，不修改系统
@@ -101,6 +103,7 @@ parse_args() {
       --esp) ESP_PROPOSALS="${2:?--esp 缺少参数}"; shift 2;;
       --cert-days) CERT_DAYS="${2:?--cert-days 缺少参数}"; shift 2;;
       --split-tunnel) ROUTE_ALL="false"; shift;;
+      --routes) ROUTE_ALL="false"; ROUTES="${2:?--routes 缺少参数}"; shift 2;;
       -y|--yes) ASSUME_YES="true"; shift;;
       --force) FORCE="true"; shift;;
       --keep-ca) KEEP_CA="true"; shift;;
@@ -116,7 +119,11 @@ parse_args() {
 validate() {
   [[ "$USERNAME" =~ ^[A-Za-z0-9][A-Za-z0-9_.@-]{0,63}$ ]] || die "用户名格式无效，最长 64 字符。"
   [[ -z "$ENDPOINT" || "$ENDPOINT" =~ ^[A-Za-z0-9_.:-]+$ ]] || die "公网入口只能是 IP 地址或域名。"
-  [[ "$VPN_POOL" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}/([8-9]|[12][0-9]|3[0-0])$ ]] || die "地址池必须是 /8 到 /30 的 IPv4 CIDR。"
+  valid_networks "$VPN_POOL" 4 true || die "地址池必须是规范的 /8 到 /30 IPv4 网络 CIDR。"
+  [[ "$VPN_POOL" =~ /([8-9]|[12][0-9]|30)$ ]] || die "地址池前缀必须在 /8 到 /30 之间。"
+  [[ "$ROUTES" =~ ^[0-9.,/]*$ ]] || die "分流路由格式无效。"
+  [[ "$ROUTE_ALL" == true || -n "$ROUTES" ]] || die "--split-tunnel 必须同时使用 --routes 指定业务网段。"
+  [[ -z "$ROUTES" ]] || valid_networks "$ROUTES" 4 false || die "--routes 包含无效 IPv4 CIDR。"
   [[ "$DNS_MODE" =~ ^(cloudflare|google|quad9|system|custom)$ ]] || die "不支持的 DNS 模式。"
   [[ "$DNS_MODE" != custom || -n "$CUSTOM_DNS" ]] || die "--dns custom 需要 --custom-dns。"
   [[ "$CUSTOM_DNS" =~ ^[A-Fa-f0-9:.,]*$ ]] || die "自定义 DNS 只能是逗号分隔的 IP 地址。"
@@ -124,6 +131,20 @@ validate() {
   [[ "$ESP_PROPOSALS" =~ ^[A-Za-z0-9_+!,.-]+$ ]] || die "ESP 提议包含无效字符。"
   if [[ ! "$CERT_DAYS" =~ ^[0-9]+$ ]] || ((CERT_DAYS < 30 || CERT_DAYS > 36500)); then die "证书有效期必须为 30-36500 天。"; fi
   [[ "$PASSWORD" != *$'\n'* && "$PASSWORD" != *$'\t'* && "$PASSWORD" != *'"'* && "$PASSWORD" != *\\* ]] || die "密码不能包含换行、制表符、双引号或反斜杠。"
+}
+
+valid_networks() {
+  python3 - "$1" "$2" "$3" <<'PY'
+import ipaddress, sys
+strict = sys.argv[3] == "true"
+try:
+    for value in sys.argv[1].split(","):
+        network = ipaddress.ip_network(value, strict=strict)
+        if network.version != int(sys.argv[2]):
+            raise ValueError
+except ValueError:
+    raise SystemExit(1)
+PY
 }
 
 require_root_ubuntu() {
@@ -183,6 +204,7 @@ IKE_PROPOSALS=$(printf %q "$IKE_PROPOSALS")
 ESP_PROPOSALS=$(printf %q "$ESP_PROPOSALS")
 CERT_DAYS=$(printf %q "$CERT_DAYS")
 ROUTE_ALL=$(printf %q "$ROUTE_ALL")
+ROUTES=$(printf %q "$ROUTES")
 EOF_SETTINGS
   chmod 600 "$SETTINGS_FILE"
   touch "$USERS_FILE"; chmod 600 "$USERS_FILE"
@@ -213,7 +235,7 @@ create_certificates() {
 
 write_ipsec_config() {
   local remote_ts="0.0.0.0/0"
-  [[ "$ROUTE_ALL" == false ]] && remote_ts="$VPN_POOL"
+  [[ "$ROUTE_ALL" == false ]] && remote_ts="$ROUTES"
   [[ -f "$IPSEC_CONF" && ! -f "${IPSEC_CONF}.easy-install.bak" ]] && cp -a "$IPSEC_CONF" "${IPSEC_CONF}.easy-install.bak"
   [[ -f "$IPSEC_SECRETS" && ! -f "${IPSEC_SECRETS}.easy-install.bak" ]] && cp -a "$IPSEC_SECRETS" "${IPSEC_SECRETS}.easy-install.bak"
   cat >"$IPSEC_CONF" <<EOF_CONF
@@ -270,26 +292,26 @@ set -euo pipefail
 ACTION="\${1:-start}"
 IPT="\$(command -v iptables)"
 has() { "\$IPT" "\$@" 2>/dev/null; }
-add() { has -C "\$@" || "\$IPT" -A "\$@"; }
-del() { while has -C "\$@"; do "\$IPT" -D "\$@"; done; }
+add() { local table="\$1" chain="\$2"; shift 2; has -t "\$table" -C "\$chain" "\$@" || "\$IPT" -t "\$table" -I "\$chain" 1 "\$@"; }
+del() { local table="\$1" chain="\$2"; shift 2; while has -t "\$table" -C "\$chain" "\$@"; do "\$IPT" -t "\$table" -D "\$chain" "\$@"; done; }
 if [[ "\$ACTION" == start ]]; then
-  add INPUT -p udp --dport 500 -j ACCEPT
-  add INPUT -p udp --dport 4500 -j ACCEPT
-  add FORWARD -s ${VPN_POOL} -m policy --dir in --pol ipsec -j ACCEPT
-  add FORWARD -d ${VPN_POOL} -m policy --dir out --pol ipsec -j ACCEPT
-  add FORWARD -s ${VPN_POOL} -o ${iface} -j ACCEPT
-  add FORWARD -d ${VPN_POOL} -i ${iface} -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT
-  add POSTROUTING -t nat -s ${VPN_POOL} -o ${iface} -m policy --dir out --pol none -j MASQUERADE
-  add FORWARD -s ${VPN_POOL} -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu
+  add filter INPUT -p udp --dport 500 -j ACCEPT
+  add filter INPUT -p udp --dport 4500 -j ACCEPT
+  add filter FORWARD -s ${VPN_POOL} -m policy --dir in --pol ipsec -j ACCEPT
+  add filter FORWARD -d ${VPN_POOL} -m policy --dir out --pol ipsec -j ACCEPT
+  add filter FORWARD -s ${VPN_POOL} -o ${iface} -j ACCEPT
+  add filter FORWARD -d ${VPN_POOL} -i ${iface} -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT
+  add nat POSTROUTING -s ${VPN_POOL} -o ${iface} -m policy --dir out --pol none -j MASQUERADE
+  add filter FORWARD -s ${VPN_POOL} -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu
 else
-  del INPUT -p udp --dport 500 -j ACCEPT
-  del INPUT -p udp --dport 4500 -j ACCEPT
-  del FORWARD -s ${VPN_POOL} -m policy --dir in --pol ipsec -j ACCEPT
-  del FORWARD -d ${VPN_POOL} -m policy --dir out --pol ipsec -j ACCEPT
-  del FORWARD -s ${VPN_POOL} -o ${iface} -j ACCEPT
-  del FORWARD -d ${VPN_POOL} -i ${iface} -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT
-  del POSTROUTING -t nat -s ${VPN_POOL} -o ${iface} -m policy --dir out --pol none -j MASQUERADE
-  del FORWARD -s ${VPN_POOL} -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu
+  del filter INPUT -p udp --dport 500 -j ACCEPT
+  del filter INPUT -p udp --dport 4500 -j ACCEPT
+  del filter FORWARD -s ${VPN_POOL} -m policy --dir in --pol ipsec -j ACCEPT
+  del filter FORWARD -d ${VPN_POOL} -m policy --dir out --pol ipsec -j ACCEPT
+  del filter FORWARD -s ${VPN_POOL} -o ${iface} -j ACCEPT
+  del filter FORWARD -d ${VPN_POOL} -i ${iface} -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT
+  del nat POSTROUTING -s ${VPN_POOL} -o ${iface} -m policy --dir out --pol none -j MASQUERADE
+  del filter FORWARD -s ${VPN_POOL} -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu
 fi
 EOF_FW
   chmod 700 "$FIREWALL_SCRIPT"
@@ -425,6 +447,7 @@ uninstall_server() {
 
 main() {
   parse_args "$@"; validate
+  [[ "$DRY_RUN" != true || "$COMMAND" == install ]] || die "--dry-run 当前仅支持 install，避免管理命令意外修改凭据。"
   [[ "$VERBOSE" == true ]] && set -x
   case "$COMMAND" in
     install) install_server;; add) add_user;; remove) remove_user;; list) list_users;;

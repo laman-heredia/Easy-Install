@@ -56,7 +56,7 @@ sudo ./wireguard.sh uninstall
 执行 `./wireguard.sh --help` 查看全部选项。脚本支持：
 
 - 自定义 UDP 端口、IPv4 VPN 网段、DNS、MTU 和 PersistentKeepalive。
-- 默认全隧道、`--split-tunnel` 或完全自定义 `--allowed-ips`。
+- 默认接管 IPv4/IPv6 路由以避免 IPv6 泄漏，也可使用 `--split-tunnel` 或完全自定义 `--allowed-ips`。
 - 可选 IPv6 ULA 地址池、IPv6 转发和 NAT66。
 - 自动分配不重复的客户端 IPv4/IPv6 地址。
 - 独立客户端私钥与额外预共享密钥，删除后立即同步运行中的接口。
@@ -138,7 +138,7 @@ sudo ./ipsec.sh uninstall
 
 - 自定义客户端 IPv4 地址池以及 Cloudflare、Google、Quad9、系统或自定义 DNS。
 - 自定义 strongSwan IKE/ESP 加密提议和证书有效期。
-- 默认全隧道或 `--split-tunnel` 分流模式。
+- 默认全隧道，或通过 `--routes 10.0.0.0/8,192.168.0.0/16` 指定分流业务网段。
 - 自动生成 RSA CA 和服务端证书，并根据入口类型写入 DNS 或 IP SAN。
 - 账号添加、强制更新、删除、列表和客户端资料重新导出。
 - 幂等 iptables 规则、MSS 调整、systemd 防火墙持久化和安全 sysctl。
@@ -212,7 +212,7 @@ sudo ./openvpn.sh uninstall
 - Ubuntu 20.04、22.04、24.04 和 26.04 版本检测；其他 Ubuntu 版本会警告后尝试安装。
 - UDP/TCP、监听端口、公网 IP/域名、VPN IPv4 网段与掩码。
 - Cloudflare、Google、Quad9、系统或自定义 DNS。
-- 全隧道（默认）或 `--split-tunnel` 分流模式。
+- 默认 IPv4 全隧道并阻断隧道外 IPv6；启用 VPN IPv6 后同时接管 IPv4/IPv6 默认路由，也可使用 `--split-tunnel` 分流。
 - `tls-crypt`（默认）或 `tls-auth`，可调整数据加密套件和认证摘要。
 - 可选 IPv6 转发、自定义 IPv6 VPN 网段。
 - 客户端添加、列出、吊销和 CRL 更新。
