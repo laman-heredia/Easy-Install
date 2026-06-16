@@ -2,6 +2,69 @@
 
 为常用服务提供真正省心的一键部署脚本：新手一路回车即可完成，熟悉系统的用户也可以细调每个关键选项。
 
+## Ubuntu 一键部署 Docker Engine
+
+通过 Docker 官方 APT 仓库安装 Docker Engine、Buildx 和 Compose 插件：
+
+```bash
+curl -fsSLO https://raw.githubusercontent.com/laman-heredia/Easy-Install/main/scripts/docker.sh
+chmod +x docker.sh
+sudo ./docker.sh
+```
+
+常用管理命令：
+
+```bash
+# 安装并允许指定用户运行 docker（docker 组等同 root 权限）
+sudo ./docker.sh --yes --user ubuntu
+
+# 自定义数据目录、日志轮转和 IPv6
+sudo ./docker.sh --data-root /data/docker --log-size 20m --log-files 5 --ipv6
+
+sudo ./docker.sh status
+sudo ./docker.sh upgrade
+
+# 默认保留镜像、容器和卷；明确指定后才删除数据
+sudo ./docker.sh uninstall
+sudo ./docker.sh uninstall --purge-data
+```
+
+脚本会配置容器 JSON 日志轮转和 `live-restore`，完成后运行官方
+`hello-world` 镜像进行验证。Docker 发布端口可能绕过部分 UFW 规则；生产环境应把
+自定义访问控制放在 `DOCKER-USER` 链中。
+
+## Ubuntu 一键部署 Nginx
+
+默认安装 Ubuntu 仓库中的 Nginx 并创建一个静态默认站点：
+
+```bash
+curl -fsSLO https://raw.githubusercontent.com/laman-heredia/Easy-Install/main/scripts/nginx.sh
+chmod +x nginx.sh
+sudo ./nginx.sh
+```
+
+静态站点、反向代理和自动 HTTPS 示例：
+
+```bash
+# 静态站点
+sudo ./nginx.sh add --domain www.example.com --root /var/www/example
+
+# 反向代理 Web 应用
+sudo ./nginx.sh add --domain app.example.com --proxy http://127.0.0.1:3000
+
+# 使用 Certbot 申请 Let's Encrypt 证书并跳转 HTTPS
+sudo ./nginx.sh add --domain app.example.com \
+  --proxy http://127.0.0.1:3000 --tls --email admin@example.com --force
+
+sudo ./nginx.sh list
+sudo ./nginx.sh status
+sudo ./nginx.sh remove --domain app.example.com
+sudo ./nginx.sh uninstall
+```
+
+申请证书前，请确保域名已经解析到服务器，且云安全组和防火墙开放 TCP 80/443。
+站点配置会在写入后执行 `nginx -t`，只有配置测试成功才会重新加载服务。
+
 ## Ubuntu 一键部署 WireGuard
 
 WireGuard 配置简单、性能优秀，特别适合手机、笔记本和服务器之间的日常 VPN
