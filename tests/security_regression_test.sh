@@ -40,8 +40,12 @@ grep -Fq '((${#ports[@]} > 0))' "$ROOT/scripts/ufw.sh" ||
   fail "UFW accepts an empty port list"
 grep -Fq 'fail2ban-client -t' "$ROOT/scripts/fail2ban.sh" ||
   fail "Fail2ban config is not syntax-tested"
+grep -Fq 'Fail2ban 新配置校验失败，已恢复原配置' "$ROOT/scripts/fail2ban.sh" ||
+  fail "Fail2ban config validation lacks rollback"
 grep -Fq 'caddy validate --config "$temp"' "$ROOT/scripts/caddy.sh" ||
   fail "Caddyfile is not validated before activation"
+grep -Fq 'Caddy 新配置重载失败，已恢复原配置' "$ROOT/scripts/caddy.sh" ||
+  fail "Caddy reload failure lacks rollback"
 grep -Fq '127.0.0.1:9100' "$ROOT/scripts/node-exporter.sh" ||
   fail "Node Exporter does not default to local-only metrics"
 

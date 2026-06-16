@@ -44,7 +44,7 @@ backend = systemd
 enabled = true
 port = ${SSH_PORT}
 EOF_JAIL
-IFS=',' read -ra jails <<<"$EXTRA_JAILS"; for jail in "${jails[@]}"; do [[ -z "$jail" || "$jail" == sshd ]] && continue; printf '\n[%s]\nenabled = true\n' "$jail" >>"$temp"; done; fail2ban-client -t -c /etc/fail2ban >/dev/null; chmod 644 "$temp"; mv "$temp" "$JAIL_LOCAL"; }
+IFS=',' read -ra jails <<<"$EXTRA_JAILS"; for jail in "${jails[@]}"; do [[ -z "$jail" || "$jail" == sshd ]] && continue; printf '\n[%s]\nenabled = true\n' "$jail" >>"$temp"; done; chmod 644 "$temp"; local backup=""; if [[ -e "$JAIL_LOCAL" ]]; then backup="$(mktemp /etc/fail2ban/jail.d/.easy-install-backup.XXXXXX)"; cp -a "$JAIL_LOCAL" "$backup"; fi; mv "$temp" "$JAIL_LOCAL"; if ! fail2ban-client -t -c /etc/fail2ban >/dev/null; then if [[ -n "$backup" ]]; then mv "$backup" "$JAIL_LOCAL"; else rm -f "$JAIL_LOCAL"; fi; die "Fail2ban 新配置校验失败，已恢复原配置。"; fi; [[ -z "$backup" ]] || rm -f "$backup"; }
 install_fail2ban(){ root_ubuntu; validate; confirm "安装 Fail2ban 并保护 SSH？" || die "已取消。"; export DEBIAN_FRONTEND=noninteractive; run apt-get update -q; run apt-get install -y fail2ban; [[ "$DRY_RUN" == true ]] && { ok "演练完成。"; return; }; write_jail; systemctl enable --now fail2ban; systemctl restart fail2ban; ok "Fail2ban 已启用。"; }
 status(){ root_ubuntu; fail2ban-client status; fail2ban-client status sshd || true; systemctl --no-pager --full status fail2ban || true; }
 unban(){ root_ubuntu; validate; [[ "$DRY_RUN" != true ]] || die "unban 不支持 --dry-run。"; [[ -n "$UNBAN_IP" ]] || die "unban 需要 --ip。"; fail2ban-client set sshd unbanip "$UNBAN_IP"; ok "已解除封禁：$UNBAN_IP"; }
