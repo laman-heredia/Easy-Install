@@ -219,6 +219,74 @@ sudo ./ufw.sh reset
 
 启用防火墙前请确认实际 SSH 端口正确，并尽量先在云厂商安全组中保留紧急访问方式。
 
+
+## Ubuntu 一键部署 Fail2ban
+
+Fail2ban 用于根据日志自动封禁爆破来源，默认启用 SSH jail：
+
+```bash
+curl -fsSLO https://raw.githubusercontent.com/laman-heredia/Easy-Install/main/scripts/fail2ban.sh
+chmod +x fail2ban.sh
+sudo ./fail2ban.sh --ssh-port 22 --bantime 1h --maxretry 5
+```
+
+常用操作：
+
+```bash
+sudo ./fail2ban.sh status
+sudo ./fail2ban.sh unban --ip 203.0.113.10
+sudo ./fail2ban.sh uninstall
+```
+
+可用 `--ignore-ip` 加入可信管理地址，用 `--jails nginx-http-auth,sshd` 启用额外 jail。
+启用前请确认 SSH 端口正确，避免把自己的管理 IP 封禁。
+
+## Ubuntu 一键部署 Caddy
+
+Caddy 适合快速部署静态站点或反向代理，并在使用真实域名时自动申请 HTTPS：
+
+```bash
+curl -fsSLO https://raw.githubusercontent.com/laman-heredia/Easy-Install/main/scripts/caddy.sh
+chmod +x caddy.sh
+sudo ./caddy.sh --domain app.example.com \
+  --proxy http://127.0.0.1:3000 --email admin@example.com
+```
+
+静态站点示例：
+
+```bash
+sudo ./caddy.sh --domain www.example.com --root /var/www/example --force
+sudo ./caddy.sh reload
+sudo ./caddy.sh status
+sudo ./caddy.sh uninstall
+```
+
+Caddyfile 会先经过 `caddy validate` 校验再写入。申请自动 HTTPS 前，请确保域名已经
+解析到服务器且 TCP 80/443 对外可达。
+
+## Ubuntu 一键部署 Prometheus Node Exporter
+
+Node Exporter 暴露系统指标，默认只监听本机 `127.0.0.1:9100`，适合配合 Prometheus
+或反向代理采集：
+
+```bash
+curl -fsSLO https://raw.githubusercontent.com/laman-heredia/Easy-Install/main/scripts/node-exporter.sh
+chmod +x node-exporter.sh
+sudo ./node-exporter.sh
+```
+
+常用操作：
+
+```bash
+# 如需远程采集，请配合防火墙只允许 Prometheus 服务器访问
+sudo ./node-exporter.sh --listen 0.0.0.0:9100 --extra-args '--collector.systemd'
+
+sudo ./node-exporter.sh status
+sudo ./node-exporter.sh uninstall
+```
+
+指标接口通常不应直接暴露到公网；建议通过 UFW、云安全组或内网地址限制访问。
+
 ## Ubuntu 一键部署 WireGuard
 
 WireGuard 配置简单、性能优秀，特别适合手机、笔记本和服务器之间的日常 VPN

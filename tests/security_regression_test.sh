@@ -38,5 +38,11 @@ grep -Fq "CREATE USER '\${DB_USER}'@'%'" "$ROOT/scripts/mysql.sh" ||
   fail "MySQL account creation uses unsafe or invalid quoting"
 grep -Fq '((${#ports[@]} > 0))' "$ROOT/scripts/ufw.sh" ||
   fail "UFW accepts an empty port list"
+grep -Fq 'fail2ban-client -t' "$ROOT/scripts/fail2ban.sh" ||
+  fail "Fail2ban config is not syntax-tested"
+grep -Fq 'caddy validate --config "$temp"' "$ROOT/scripts/caddy.sh" ||
+  fail "Caddyfile is not validated before activation"
+grep -Fq '127.0.0.1:9100' "$ROOT/scripts/node-exporter.sh" ||
+  fail "Node Exporter does not default to local-only metrics"
 
 echo "Security regression tests passed"
