@@ -123,7 +123,7 @@ validate() {
   [[ "$VPN_POOL" =~ /([8-9]|[12][0-9]|30)$ ]] || die "地址池前缀必须在 /8 到 /30 之间。"
   [[ "$ROUTES" =~ ^[0-9.,/]*$ ]] || die "分流路由格式无效。"
   [[ "$ROUTE_ALL" == true || -n "$ROUTES" ]] || die "--split-tunnel 必须同时使用 --routes 指定业务网段。"
-  [[ -z "$ROUTES" ]] || valid_networks "$ROUTES" 4 false || die "--routes 包含无效 IPv4 CIDR。"
+  [[ -z "$ROUTES" ]] || valid_networks "$ROUTES" 4 true || die "--routes 必须是规范的 IPv4 网络 CIDR。"
   [[ "$DNS_MODE" =~ ^(cloudflare|google|quad9|system|custom)$ ]] || die "不支持的 DNS 模式。"
   [[ "$DNS_MODE" != custom || -n "$CUSTOM_DNS" ]] || die "--dns custom 需要 --custom-dns。"
   [[ "$CUSTOM_DNS" =~ ^[A-Fa-f0-9:.,]*$ ]] || die "自定义 DNS 只能是逗号分隔的 IP 地址。"
@@ -145,6 +145,14 @@ try:
 except ValueError:
     raise SystemExit(1)
 PY
+}
+
+ensure_bootstrap() {
+  command -v python3 >/dev/null && command -v curl >/dev/null && return
+  [[ "$DRY_RUN" != true ]] || die "演练模式需要预先安装 python3 和 curl。"
+  log "安装参数校验和公网探测所需的基础工具…"
+  apt-get update -q
+  apt-get install -y --no-install-recommends python3-minimal curl ca-certificates
 }
 
 require_root_ubuntu() {
@@ -360,7 +368,8 @@ upsert_user() {
   printf '%s\t%s\n' "$USERNAME" "$PASSWORD" >>"$USERS_FILE"
   chmod 600 "$USERS_FILE"
   rebuild_secrets
-  run ipsec rereadsecrets
+  warn "为使凭据更新立即生效，将重启 IPsec 并断开现有会话。"
+  run ipsec restart
   export_client
   success "IPsec 账号已创建：$USERNAME"
 }
@@ -389,6 +398,8 @@ EOF_PROFILE
 
 install_server() {
   require_root_ubuntu
+  ensure_bootstrap
+  validate
   [[ ! -e "$SETTINGS_FILE" || "$FORCE" == true ]] || die "IPsec 已安装；使用 add 管理账号，或 --force 重装。"
   detect_endpoint; validate
   log "将安装 IKEv2/IPsec：入口 $ENDPOINT，地址池 $VPN_POOL，首个账号 $USERNAME"
@@ -398,12 +409,12 @@ install_server() {
   if [[ -e "$SETTINGS_FILE" ]]; then
     systemctl disable --now easy-install-ipsec-firewall.service 2>/dev/null || true
     if [[ -x "$FIREWALL_SCRIPT" ]]; then "$FIREWALL_SCRIPT" stop || true; fi
+    systemctl disable --now strongswan-starter.service 2>/dev/null || true
     rm -rf "$CONFIG_DIR"
   fi
   save_settings; create_certificates; write_ipsec_config; write_network_config
   run systemctl enable --now strongswan-starter.service
   upsert_user
-  run ipsec restart
   success "IKEv2/IPsec 安装完成。请放行 UDP 500 和 UDP 4500。"
 }
 
@@ -415,7 +426,8 @@ remove_user() {
   confirm "确定删除账号 $USERNAME？" || die "已取消。"
   awk -F'\t' -v user="$USERNAME" '$1!=user' "$USERS_FILE" >"${USERS_FILE}.tmp"; mv "${USERS_FILE}.tmp" "$USERS_FILE"
   rebuild_secrets
-  run ipsec rereadsecrets
+  warn "为立即终止被删除账号的活动会话，将重启 IPsec。"
+  run ipsec restart
   success "账号 $USERNAME 已删除。"
 }
 
@@ -446,8 +458,9 @@ uninstall_server() {
 }
 
 main() {
-  parse_args "$@"; validate
+  parse_args "$@"
   [[ "$DRY_RUN" != true || "$COMMAND" == install ]] || die "--dry-run 当前仅支持 install，避免管理命令意外修改凭据。"
+  [[ "$COMMAND" == install ]] || validate
   [[ "$VERBOSE" == true ]] && set -x
   case "$COMMAND" in
     install) install_server;; add) add_user;; remove) remove_user;; list) list_users;;

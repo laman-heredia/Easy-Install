@@ -153,6 +153,14 @@ except ValueError:
 PY
 }
 
+ensure_bootstrap() {
+  command -v python3 >/dev/null && command -v curl >/dev/null && return
+  [[ "$DRY_RUN" != true ]] || die "演练模式需要预先安装 python3 和 curl。"
+  log "安装参数校验和公网探测所需的基础工具…"
+  apt-get update -q
+  apt-get install -y --no-install-recommends python3-minimal curl ca-certificates
+}
+
 require_root_ubuntu() {
   ((EUID == 0)) || die "请使用 root 权限运行：sudo $PROGRAM"
   [[ -r /etc/os-release ]] || die "无法识别操作系统。"
@@ -288,7 +296,7 @@ sync_interface() {
 }
 
 create_client() {
-  local meta="$PEERS_DIR/${CLIENT_NAME}.meta" index address4 address6="" private_key public_key client_allowed endpoint_value temp_dir
+  local meta="$PEERS_DIR/${CLIENT_NAME}.meta" index address4 address6="" private_key public_key client_allowed endpoint_value temp_dir final_conf final_png
   [[ ! -e "$meta" ]] || die "客户端 $CLIENT_NAME 已存在。为避免更新失败导致旧配置失效，请先删除同名客户端或使用新名称。"
   index="$(next_index)"
   address4="$(ipcalc client "$VPN_SUBNET" "$index")"
@@ -308,9 +316,11 @@ EOF_META
   chmod 600 "$temp_dir/key" "$temp_dir/psk" "$temp_dir/meta"
   if [[ -n "$ALLOWED_IPS" ]]; then client_allowed="$ALLOWED_IPS"; elif [[ "$ROUTE_ALL" == true ]]; then client_allowed="0.0.0.0/0, ::/0"; else client_allowed="$VPN_SUBNET$( [[ "$IPV6" == true ]] && printf ', %s' "$IPV6_SUBNET" )"; fi
   mkdir -p "$OUTPUT_DIR"
+  final_conf="$OUTPUT_DIR/${CLIENT_NAME}.conf"
+  final_png="$OUTPUT_DIR/${CLIENT_NAME}.png"
   endpoint_value="$ENDPOINT"
   [[ "$endpoint_value" == *:* && "$endpoint_value" != \\[*\\] ]] && endpoint_value="[$endpoint_value]"
-  cat >"$OUTPUT_DIR/${CLIENT_NAME}.conf" <<EOF_CLIENT
+  cat >"$temp_dir/client.conf" <<EOF_CLIENT
 [Interface]
 PrivateKey = ${private_key}
 Address = ${address4}/32$( [[ -n "$address6" ]] && printf ', %s/128' "$address6" )
@@ -324,19 +334,21 @@ Endpoint = ${endpoint_value}:${PORT}
 AllowedIPs = ${client_allowed}
 $( ((KEEPALIVE > 0)) && echo "PersistentKeepalive = ${KEEPALIVE}" )
 EOF_CLIENT
-  chmod 600 "$OUTPUT_DIR/${CLIENT_NAME}.conf"
-  qrencode -t PNG -o "$OUTPUT_DIR/${CLIENT_NAME}.png" -r "$OUTPUT_DIR/${CLIENT_NAME}.conf"
-  chmod 600 "$OUTPUT_DIR/${CLIENT_NAME}.png"
+  chmod 600 "$temp_dir/client.conf"
+  qrencode -t PNG -o "$temp_dir/client.png" -r "$temp_dir/client.conf"
+  chmod 600 "$temp_dir/client.png"
   install -m 600 "$temp_dir/key" "$PEERS_DIR/${CLIENT_NAME}.key"
   install -m 600 "$temp_dir/psk" "$PEERS_DIR/${CLIENT_NAME}.psk"
   install -m 600 "$temp_dir/meta" "$meta"
-  install -m 600 "$OUTPUT_DIR/${CLIENT_NAME}.conf" "$PEERS_DIR/${CLIENT_NAME}.conf"
+  install -m 600 "$temp_dir/client.conf" "$PEERS_DIR/${CLIENT_NAME}.conf"
   write_server_config
   if ! sync_interface; then
     remove_client_files "$CLIENT_NAME"
     write_server_config
     die "同步 WireGuard 接口失败，已回滚新客户端。"
   fi
+  install -m 600 "$temp_dir/client.conf" "$final_conf"
+  install -m 600 "$temp_dir/client.png" "$final_png"
   rm -rf "$temp_dir"
   trap - RETURN
   success "客户端配置：$OUTPUT_DIR/${CLIENT_NAME}.conf"
@@ -347,6 +359,8 @@ remove_client_files() { rm -f "$PEERS_DIR/$1.key" "$PEERS_DIR/$1.psk" "$PEERS_DI
 
 install_server() {
   require_root_ubuntu
+  ensure_bootstrap
+  validate
   [[ ! -e "$SETTINGS_FILE" || "$FORCE" == true ]] || die "WireGuard 已安装；使用 add 添加客户端，或 --force 重装。"
   detect_endpoint; validate
   log "将安装 WireGuard：${ENDPOINT}:${PORT}/udp，网段 $VPN_SUBNET，客户端 $CLIENT_NAME"
@@ -372,7 +386,20 @@ remove_client() {
   require_root_ubuntu; load_settings
   [[ -e "$PEERS_DIR/${CLIENT_NAME}.meta" ]] || die "客户端 $CLIENT_NAME 不存在。"
   confirm "确定删除客户端 $CLIENT_NAME？" || die "已取消。"
-  remove_client_files "$CLIENT_NAME"; write_server_config; sync_interface
+  local trash file suffix
+  trash="$(mktemp -d "$CONFIG_DIR/.remove-${CLIENT_NAME}.XXXXXX")"
+  trap 'rm -rf "${trash:-}"' RETURN
+  for suffix in key psk meta conf; do
+    [[ ! -e "$PEERS_DIR/${CLIENT_NAME}.${suffix}" ]] || mv "$PEERS_DIR/${CLIENT_NAME}.${suffix}" "$trash/"
+  done
+  write_server_config
+  if ! sync_interface; then
+    for file in "$trash"/*; do [[ ! -e "$file" ]] || mv "$file" "$PEERS_DIR/"; done
+    write_server_config
+    die "同步 WireGuard 接口失败，已恢复客户端 $CLIENT_NAME。"
+  fi
+  rm -rf "$trash"
+  trap - RETURN
   success "客户端 $CLIENT_NAME 已删除。"
 }
 
@@ -410,8 +437,9 @@ uninstall_server() {
 }
 
 main() {
-  parse_args "$@"; validate
+  parse_args "$@"
   [[ "$DRY_RUN" != true || "$COMMAND" == install ]] || die "--dry-run 当前仅支持 install，避免管理命令意外修改密钥。"
+  [[ "$COMMAND" == install ]] || validate
   [[ "$VERBOSE" == true ]] && set -x
   case "$COMMAND" in
     install) install_server;; add) add_client;; remove) remove_client;; list) list_clients;;

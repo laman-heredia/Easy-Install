@@ -150,6 +150,14 @@ PY
   if [[ "$COMPRESSION" == "true" ]]; then warn "压缩可能遭受 VORACLE 类攻击，仅应为兼容旧客户端启用。"; fi
 }
 
+ensure_bootstrap() {
+  command -v python3 >/dev/null && command -v curl >/dev/null && return
+  [[ "$DRY_RUN" != "true" ]] || die "演练模式需要预先安装 python3 和 curl。"
+  log "安装参数校验和公网探测所需的基础工具…"
+  apt-get update -q
+  apt-get install -y --no-install-recommends python3-minimal curl ca-certificates
+}
+
 require_root_ubuntu() {
   ((EUID == 0)) || die "请使用 root 权限运行：sudo $PROGRAM"
   [[ -r /etc/os-release ]] || die "无法识别操作系统。"
@@ -248,7 +256,11 @@ write_server_config() {
   [[ "$PROTOCOL" == "udp" ]] && exit_notify="explicit-exit-notify 1"
   [[ "$TLS_MODE" == "tls-crypt" ]] && tls_line="tls-crypt ${TLS_MODE}.key" || tls_line=$'tls-auth tls-auth.key 0\nkey-direction 0'
   [[ "$COMPRESSION" == "true" ]] && compression_lines=$'compress lz4-v2\npush "compress lz4-v2"'
-  if [[ "$IPV6" == "true" ]]; then ipv6_lines="server-ipv6 ${IPV6_SUBNET}"; else ipv6_lines='push "block-ipv6"'; fi
+  if [[ "$IPV6" == "true" ]]; then
+    ipv6_lines="server-ipv6 ${IPV6_SUBNET}"
+  elif [[ "$ROUTE_ALL" == "true" ]]; then
+    ipv6_lines='push "block-ipv6"'
+  fi
   if [[ "$ROUTE_ALL" == "true" ]]; then
     redirect_line='push "redirect-gateway def1 bypass-dhcp"'
     [[ "$IPV6" == "true" ]] && redirect_line+=$'\npush "redirect-gateway ipv6"'
@@ -366,9 +378,11 @@ create_client() {
 }
 
 generate_profile() {
-  local cert="$1" key="$2" output tls_inline proto="$PROTOCOL"
+  local cert="$1" key="$2" output temp_output tls_inline proto="$PROTOCOL"
   mkdir -p "$OUTPUT_DIR"
   output="${OUTPUT_DIR%/}/${CLIENT_NAME}.ovpn"
+  temp_output="$(mktemp "${OUTPUT_DIR%/}/.${CLIENT_NAME}.ovpn.XXXXXX")"
+  trap 'rm -f "${temp_output:-}"' RETURN
   [[ "$PROTOCOL" == "tcp" ]] && proto="tcp-client"
   if [[ "$TLS_MODE" == "tls-crypt" ]]; then
     tls_inline="<tls-crypt>$(printf '\n'; cat "${CONFIG_DIR}/tls-crypt.key")</tls-crypt>"
@@ -376,7 +390,7 @@ generate_profile() {
     tls_inline="key-direction 1
 <tls-auth>$(printf '\n'; cat "${CONFIG_DIR}/tls-auth.key")</tls-auth>"
   fi
-  cat >"$output" <<EOF_CLIENT
+  cat >"$temp_output" <<EOF_CLIENT
 client
 dev tun
 proto ${proto}
@@ -403,14 +417,18 @@ $(cat "$key")
 </key>
 ${tls_inline}
 EOF_CLIENT
-  sed -i '/^[[:space:]]*$/d' "$output"
-  chmod 600 "$output"
+  sed -i '/^[[:space:]]*$/d' "$temp_output"
+  chmod 600 "$temp_output"
+  mv -f "$temp_output" "$output"
   install -m 600 "$output" "$CLIENT_DIR/${CLIENT_NAME}.ovpn"
+  trap - RETURN
   success "客户端配置已生成：${output}"
 }
 
 install_server() {
   require_root_ubuntu
+  ensure_bootstrap
+  validate
   [[ -c /dev/net/tun ]] || die "未发现 /dev/net/tun；请先在宿主机或 VPS 控制台启用 TUN。"
   if [[ -e "$SETTINGS_FILE" && "$FORCE" != "true" ]]; then die "OpenVPN 已由本脚本安装。使用 add 添加客户端，或用 --force 重装。"; fi
   detect_endpoint
@@ -424,7 +442,7 @@ install_server() {
     systemctl disable --now easy-install-openvpn-firewall.service 2>/dev/null || true
     if [[ -x "$FIREWALL_SCRIPT" ]]; then "$FIREWALL_SCRIPT" stop || true; fi
     systemctl disable --now openvpn-server@server.service 2>/dev/null || true
-    rm -rf "$PKI_DIR"
+    rm -rf "$CONFIG_DIR" "$SERVER_DIR"
   fi
   create_pki
   write_server_config
@@ -478,8 +496,8 @@ uninstall_server() {
 
 main() {
   parse_args "$@"
-  validate
   [[ "$DRY_RUN" != "true" || "$COMMAND" == install ]] || die "--dry-run 当前仅支持 install，避免管理命令意外修改证书。"
+  [[ "$COMMAND" == install ]] || validate
   [[ "$VERBOSE" == "true" ]] && set -x
   case "$COMMAND" in
     install) install_server;; add) add_client;; revoke) revoke_client;;

@@ -10,6 +10,7 @@ if "$SCRIPT" --user '../bad' >/dev/null 2>&1; then fail "invalid user accepted";
 if "$SCRIPT" --pool 10.10.0.0/33 >/dev/null 2>&1; then fail "invalid pool accepted"; fi
 if "$SCRIPT" --pool 999.10.0.0/24 >/dev/null 2>&1; then fail "invalid pool address accepted"; fi
 if "$SCRIPT" --split-tunnel >/dev/null 2>&1; then fail "split tunnel without routes accepted"; fi
+if "$SCRIPT" --routes 10.0.0.42/24 >/dev/null 2>&1; then fail "route with host bits accepted"; fi
 if "$SCRIPT" add --dry-run >/dev/null 2>&1; then fail "management dry-run accepted"; fi
 if "$SCRIPT" --dns custom >/dev/null 2>&1; then fail "empty custom DNS accepted"; fi
 if "$SCRIPT" --cert-days 7 >/dev/null 2>&1; then fail "invalid certificate lifetime accepted"; fi
