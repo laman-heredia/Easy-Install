@@ -1,0 +1,56 @@
+#!/usr/bin/env bash
+set -euo pipefail
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+fail() { echo "FAIL: $*" >&2; exit 1; }
+
+# shellcheck disable=SC2016
+grep -Fq 'elif [[ "$ROUTE_ALL" == "true" ]]' "$ROOT/scripts/openvpn.sh" ||
+  fail "OpenVPN split tunnel would block IPv6"
+# shellcheck disable=SC2016
+grep -Fq 'cat >"$temp_output"' "$ROOT/scripts/openvpn.sh" ||
+  fail "OpenVPN profile is not staged atomically"
+# shellcheck disable=SC2016
+grep -Fq 'cat >"$temp_dir/client.conf"' "$ROOT/scripts/wireguard.sh" ||
+  fail "WireGuard client profile is not staged"
+grep -Fq '已恢复客户端' "$ROOT/scripts/wireguard.sh" ||
+  fail "WireGuard peer removal lacks rollback"
+[[ "$(grep -c 'run ipsec restart' "$ROOT/scripts/ipsec.sh")" -ge 2 ]] ||
+  fail "IPsec credential changes do not terminate active sessions"
+for script in ipsec l2tp openvpn wireguard; do
+  grep -Fq 'ensure_bootstrap' "$ROOT/scripts/${script}.sh" ||
+    fail "$script lacks dependency bootstrap"
+done
+grep -Fq 'systemctl restart docker' "$ROOT/scripts/docker.sh" ||
+  fail "Docker daemon configuration is not applied after installation"
+grep -Fq 'DAEMON_BACKUP=' "$ROOT/scripts/docker.sh" ||
+  fail "Docker does not preserve a pre-existing daemon configuration"
+grep -Fq 'Nginx 新配置校验失败，已恢复原配置' "$ROOT/scripts/nginx.sh" ||
+  fail "Nginx site updates lack validation rollback"
+grep -Fq '/^# Easy Install begin$/{skip=1;next}' "$ROOT/scripts/postgresql.sh" ||
+  fail "PostgreSQL leaves stale managed pg_hba rules"
+redis_validate_line="$(grep -nF 'redis-server "$temp" --test-memory 2' "$ROOT/scripts/redis.sh" | cut -d: -f1)"
+redis_install_line="$(grep -nF 'mv "$temp" "$CONF"' "$ROOT/scripts/redis.sh" | cut -d: -f1)"
+[[ -n "$redis_validate_line" && -n "$redis_install_line" && "$redis_validate_line" -le "$redis_install_line" ]] ||
+  fail "Redis installs configuration before validating it"
+grep -Fq 'MySQL 新配置启动失败，已恢复原配置' "$ROOT/scripts/mysql.sh" ||
+  fail "MySQL configuration updates lack restart rollback"
+grep -Fq "CREATE USER '\${DB_USER}'@'%'" "$ROOT/scripts/mysql.sh" ||
+  fail "MySQL account creation uses unsafe or invalid quoting"
+grep -Fq '((${#ports[@]} > 0))' "$ROOT/scripts/ufw.sh" ||
+  fail "UFW accepts an empty port list"
+grep -Fq 'fail2ban-client -t' "$ROOT/scripts/fail2ban.sh" ||
+  fail "Fail2ban config is not syntax-tested"
+grep -Fq 'Fail2ban 新配置校验失败，已恢复原配置' "$ROOT/scripts/fail2ban.sh" ||
+  fail "Fail2ban config validation lacks rollback"
+grep -Fq 'caddy validate --config "$temp"' "$ROOT/scripts/caddy.sh" ||
+  fail "Caddyfile is not validated before activation"
+grep -Fq 'Caddy 新配置重载失败，已恢复原配置' "$ROOT/scripts/caddy.sh" ||
+  fail "Caddy reload failure lacks rollback"
+grep -Fq '127.0.0.1:9100' "$ROOT/scripts/node-exporter.sh" ||
+  fail "Node Exporter does not default to local-only metrics"
+grep -Fq -- '-m policy --dir in --pol ipsec' "$ROOT/scripts/l2tp.sh" ||
+  fail "L2TP UDP 1701 is not restricted to IPsec policy"
+grep -Fq 'chmod 600 "$file"' "$ROOT/scripts/l2tp.sh" ||
+  fail "L2TP PPP secrets are not protected"
+
+echo "Security regression tests passed"
