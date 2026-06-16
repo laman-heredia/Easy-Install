@@ -20,5 +20,17 @@ for script in ipsec openvpn wireguard; do
   grep -Fq 'ensure_bootstrap' "$ROOT/scripts/${script}.sh" ||
     fail "$script lacks dependency bootstrap"
 done
+grep -Fq 'systemctl restart docker' "$ROOT/scripts/docker.sh" ||
+  fail "Docker daemon configuration is not applied after installation"
+grep -Fq 'DAEMON_BACKUP=' "$ROOT/scripts/docker.sh" ||
+  fail "Docker does not preserve a pre-existing daemon configuration"
+grep -Fq 'Nginx 新配置校验失败，已恢复原配置' "$ROOT/scripts/nginx.sh" ||
+  fail "Nginx site updates lack validation rollback"
+grep -Fq '/^# Easy Install begin$/{skip=1;next}' "$ROOT/scripts/postgresql.sh" ||
+  fail "PostgreSQL leaves stale managed pg_hba rules"
+redis_validate_line="$(grep -nF 'redis-server "$temp" --test-memory 2' "$ROOT/scripts/redis.sh" | cut -d: -f1)"
+redis_install_line="$(grep -nF 'mv "$temp" "$CONF"' "$ROOT/scripts/redis.sh" | cut -d: -f1)"
+[[ -n "$redis_validate_line" && -n "$redis_install_line" && "$redis_validate_line" -le "$redis_install_line" ]] ||
+  fail "Redis installs configuration before validating it"
 
 echo "Security regression tests passed"

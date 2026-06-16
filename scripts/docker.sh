@@ -5,6 +5,7 @@ readonly SCRIPT_VERSION="1.0.0"
 readonly KEYRING="/etc/apt/keyrings/docker.asc"
 readonly SOURCE_FILE="/etc/apt/sources.list.d/docker.sources"
 readonly DAEMON_FILE="/etc/docker/daemon.json"
+readonly DAEMON_BACKUP="/etc/docker/daemon.json.easy-install.bak"
 COMMAND="install"; USER_NAME=""; DATA_ROOT=""; LOG_SIZE="10m"; LOG_FILES="3"; IPV6="false"; LIVE_RESTORE="true"; ASSUME_YES="false"; FORCE="false"; PURGE_DATA="false"; DRY_RUN="false"; VERBOSE="false"
 log(){ printf '\033[1;34m[INFO]\033[0m %s\n' "$*"; }; ok(){ printf '\033[1;32m[ OK ]\033[0m %s\n' "$*"; }; warn(){ printf '\033[1;33m[WARN]\033[0m %s\n' "$*" >&2; }; die(){ printf '\033[1;31m[FAIL]\033[0m %s\n' "$*" >&2; exit 1; }
 run(){ if [[ "$DRY_RUN" == true ]]; then printf '[dry-run]'; printf ' %q' "$@"; printf '\n'; else "$@"; fi; }
@@ -45,18 +46,18 @@ Architectures: ${arch}
 Signed-By: ${KEYRING}
 EOF_SOURCE
 fi; }
-write_daemon(){ [[ ! -e "$DAEMON_FILE" || "$FORCE" == true ]] || die "$DAEMON_FILE 已存在；使用 --force 覆盖。"; install -d -m 755 /etc/docker; local temp; temp="$(mktemp /etc/docker/.daemon.json.XXXXXX)"; cat >"$temp" <<EOF_JSON
+write_daemon(){ [[ ! -e "$DAEMON_FILE" || "$FORCE" == true ]] || die "$DAEMON_FILE 已存在；使用 --force 覆盖。"; install -d -m 755 /etc/docker; [[ ! -e "$DAEMON_FILE" || -e "$DAEMON_BACKUP" ]] || cp -a "$DAEMON_FILE" "$DAEMON_BACKUP"; local temp; temp="$(mktemp /etc/docker/.daemon.json.XXXXXX)"; cat >"$temp" <<EOF_JSON
 {
   "log-driver": "json-file",
   "log-opts": {"max-size": "${LOG_SIZE}", "max-file": "${LOG_FILES}"},
   "live-restore": ${LIVE_RESTORE},
-  "ipv6": ${IPV6}$( [[ -n "$DATA_ROOT" ]] && printf ',\n  "data-root": "%s"' "$DATA_ROOT" )
+  "ipv6": ${IPV6}$( [[ "$IPV6" == true ]] && printf ',\n  "fixed-cidr-v6": "fd00:dead:beef::/64"' )$( [[ -n "$DATA_ROOT" ]] && printf ',\n  "data-root": "%s"' "$DATA_ROOT" )
 }
 EOF_JSON
 python3 -m json.tool "$temp" >/dev/null; chmod 600 "$temp"; mv "$temp" "$DAEMON_FILE"; }
-install_docker(){ root_ubuntu; validate; confirm "安装 Docker Engine？" || die "已取消。"; export DEBIAN_FRONTEND=noninteractive; run apt-get update -q; run apt-get install -y ca-certificates curl python3-minimal; repo; run apt-get update -q; run apt-get remove -y docker.io docker-doc docker-compose podman-docker containerd runc || true; run apt-get install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin; [[ "$DRY_RUN" == true ]] && { ok "演练完成。"; return; }; write_daemon; systemctl enable --now docker; [[ -z "$USER_NAME" ]] || { id "$USER_NAME" >/dev/null || die "用户不存在：$USER_NAME"; usermod -aG docker "$USER_NAME"; warn "docker 组具有 root 权限，用户需重新登录。"; }; docker run --rm hello-world >/dev/null; ok "Docker Engine 安装完成。"; }
+install_docker(){ root_ubuntu; validate; confirm "安装 Docker Engine？" || die "已取消。"; export DEBIAN_FRONTEND=noninteractive; run apt-get update -q; run apt-get install -y ca-certificates curl python3-minimal; repo; run apt-get update -q; run apt-get remove -y docker.io docker-doc docker-compose podman-docker containerd runc || true; run apt-get install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin; [[ "$DRY_RUN" == true ]] && { ok "演练完成。"; return; }; write_daemon; systemctl enable docker; systemctl restart docker; [[ -z "$USER_NAME" ]] || { id "$USER_NAME" >/dev/null || die "用户不存在：$USER_NAME"; usermod -aG docker "$USER_NAME"; warn "docker 组具有 root 权限，用户需重新登录。"; }; docker run --rm hello-world >/dev/null; ok "Docker Engine 安装完成。"; }
 upgrade(){ root_ubuntu; run apt-get update -q; run apt-get install --only-upgrade -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin; [[ "$DRY_RUN" == true ]] || systemctl restart docker; }
 status(){ root_ubuntu; docker version; docker compose version; systemctl --no-pager --full status docker || true; docker system df || true; }
-uninstall(){ root_ubuntu; [[ "$DRY_RUN" != true ]] || die "uninstall 不支持 --dry-run。"; confirm "确定卸载 Docker？" || die "已取消。"; systemctl disable --now docker containerd 2>/dev/null || true; apt-get purge -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin docker-ce-rootless-extras; rm -f "$SOURCE_FILE" "$KEYRING" "$DAEMON_FILE"; if [[ "$PURGE_DATA" == true ]]; then rm -rf /var/lib/docker /var/lib/containerd; [[ -z "$DATA_ROOT" ]] || rm -rf -- "$DATA_ROOT"; else warn "镜像、容器和卷数据仍保留。"; fi; apt-get update -q; ok "Docker 已卸载。"; }
+uninstall(){ root_ubuntu; [[ "$DRY_RUN" != true ]] || die "uninstall 不支持 --dry-run。"; confirm "确定卸载 Docker？" || die "已取消。"; systemctl disable --now docker containerd 2>/dev/null || true; apt-get purge -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin docker-ce-rootless-extras; rm -f "$SOURCE_FILE" "$KEYRING"; if [[ -e "$DAEMON_BACKUP" ]]; then mv "$DAEMON_BACKUP" "$DAEMON_FILE"; else rm -f "$DAEMON_FILE"; fi; if [[ "$PURGE_DATA" == true ]]; then rm -rf /var/lib/docker /var/lib/containerd; [[ -z "$DATA_ROOT" ]] || rm -rf -- "$DATA_ROOT"; else warn "镜像、容器和卷数据仍保留。"; fi; apt-get update -q; ok "Docker 已卸载。"; }
 main(){ parse "$@"; [[ "$VERBOSE" == true ]] && set -x; case "$COMMAND" in install) install_docker;; upgrade) root_ubuntu; validate; upgrade;; status) status;; uninstall) uninstall;; esac; }
 main "$@"

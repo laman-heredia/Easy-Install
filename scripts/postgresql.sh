@@ -36,6 +36,7 @@ import ipaddress, sys
 ipaddress.ip_network(sys.argv[1], strict=False)
 PY
 }
+ensure_bootstrap(){ command -v python3 >/dev/null && return; [[ "$DRY_RUN" != true ]] || die "演练模式需要预先安装 python3。"; apt-get update -q; apt-get install -y --no-install-recommends python3-minimal; }
 root_ubuntu(){ ((EUID==0)) || die "请使用 sudo。"; source /etc/os-release; [[ ${ID:-} == ubuntu ]] || die "仅支持 Ubuntu。"; }
 confirm(){ [[ "$ASSUME_YES" == true ]] && return; read -r -p "$1 [Y/n] " a; [[ -z "$a" || "$a" =~ ^[Yy]$ ]]; }
 password(){ [[ -n "$DB_PASSWORD" ]] || DB_PASSWORD="$(openssl rand -base64 24 | tr -d '\n')"; }
@@ -47,13 +48,13 @@ port = ${PORT}
 password_encryption = 'scram-sha-256'
 # Easy Install end
 EOF_CONF
-install -m 644 "$temp" "$conf"; rm -f "$temp"; if [[ -n "$ALLOW_CIDR" ]]; then grep -Fq "host all all $ALLOW_CIDR scram-sha-256" "$hba" || printf '\n# Easy Install\nhost all all %s scram-sha-256\n' "$ALLOW_CIDR" >>"$hba"; fi; systemctl restart postgresql; }
+install -m 644 "$temp" "$conf"; rm -f "$temp"; local hba_temp; hba_temp="$(mktemp "$(dirname "$hba")/.pg_hba.XXXXXX")"; awk '/^# Easy Install begin$/{skip=1;next} /^# Easy Install end$/{skip=0;next} !skip' "$hba" >"$hba_temp"; if [[ -n "$ALLOW_CIDR" ]]; then printf '\n# Easy Install begin\nhost all all %s scram-sha-256\n# Easy Install end\n' "$ALLOW_CIDR" >>"$hba_temp"; fi; chown postgres:postgres "$hba_temp"; chmod 640 "$hba_temp"; mv "$hba_temp" "$hba"; systemctl restart postgresql; }
 create_db(){ password; local exists; exists="$(runuser -u postgres -- psql -Atqc "SELECT 1 FROM pg_roles WHERE rolname='$DB_USER'")"; if [[ "$exists" == 1 ]]; then [[ "$FORCE" == true ]] || die "角色已存在；使用 --force 更新。"; printf "ALTER ROLE \"%s\" WITH LOGIN PASSWORD :'pwd';\n" "$DB_USER" | runuser -u postgres -- psql -v pwd="$DB_PASSWORD"; else printf "CREATE ROLE \"%s\" WITH LOGIN PASSWORD :'pwd';\n" "$DB_USER" | runuser -u postgres -- psql -v pwd="$DB_PASSWORD"; fi; exists="$(runuser -u postgres -- psql -Atqc "SELECT 1 FROM pg_database WHERE datname='$DB_NAME'")"; if [[ "$exists" == 1 ]]; then [[ "$FORCE" == true ]] || die "数据库已存在；使用 --force 更新所有者。"; runuser -u postgres -- psql -c "ALTER DATABASE \"$DB_NAME\" OWNER TO \"$DB_USER\";"; else runuser -u postgres -- createdb --owner="$DB_USER" "$DB_NAME"; fi; ok "数据库：$DB_NAME；用户：$DB_USER；密码：$DB_PASSWORD"; }
-install_pg(){ root_ubuntu; validate; confirm "安装 PostgreSQL？" || die "已取消。"; export DEBIAN_FRONTEND=noninteractive; run apt-get update -q; run apt-get install -y postgresql postgresql-contrib openssl python3-minimal; [[ "$DRY_RUN" == true ]] && { ok "演练完成。"; return; }; systemctl enable --now postgresql; configure; create_db; }
+install_pg(){ root_ubuntu; ensure_bootstrap; validate; confirm "安装 PostgreSQL？" || die "已取消。"; export DEBIAN_FRONTEND=noninteractive; run apt-get update -q; run apt-get install -y postgresql postgresql-contrib openssl python3-minimal; [[ "$DRY_RUN" == true ]] && { ok "演练完成。"; return; }; systemctl enable --now postgresql; configure; create_db; }
 create(){ root_ubuntu; validate; [[ "$DRY_RUN" != true ]] || die "create 不支持 --dry-run。"; create_db; }
 backup(){ root_ubuntu; validate; [[ "$DRY_RUN" != true ]] || die "backup 不支持 --dry-run。"; mkdir -p "$BACKUP_DIR"; local out; out="$BACKUP_DIR/${DB_NAME}-$(date -u +%Y%m%dT%H%M%SZ).dump"; runuser -u postgres -- pg_dump --format=custom "$DB_NAME" >"$out"; chmod 600 "$out"; ok "备份：$out"; }
 list(){ root_ubuntu; runuser -u postgres -- psql -c '\l'; runuser -u postgres -- psql -c '\du'; }
 status(){ root_ubuntu; systemctl --no-pager --full status postgresql || true; pg_isready -h localhost -p "$PORT"; }
 uninstall(){ root_ubuntu; [[ "$DRY_RUN" != true ]] || die "uninstall 不支持 --dry-run。"; confirm "确定卸载 PostgreSQL？" || die "已取消。"; systemctl disable --now postgresql 2>/dev/null || true; apt-get purge -y 'postgresql*'; if [[ "$PURGE_DATA" == true ]]; then rm -rf /var/lib/postgresql /etc/postgresql /var/log/postgresql; else warn "数据库数据仍保留在 /var/lib/postgresql。"; fi; ok "PostgreSQL 已卸载。"; }
-main(){ parse "$@"; [[ "$DRY_RUN" != true || "$COMMAND" == install ]] || die "--dry-run 仅支持 install。"; validate; [[ "$VERBOSE" == true ]] && set -x; case "$COMMAND" in install) install_pg;; create) create;; backup) backup;; list) list;; status) status;; uninstall) uninstall;; esac; }
+main(){ parse "$@"; [[ "$DRY_RUN" != true || "$COMMAND" == install ]] || die "--dry-run 仅支持 install。"; [[ "$COMMAND" == install ]] || validate; [[ "$VERBOSE" == true ]] && set -x; case "$COMMAND" in install) install_pg;; create) create;; backup) backup;; list) list;; status) status;; uninstall) uninstall;; esac; }
 main "$@"
