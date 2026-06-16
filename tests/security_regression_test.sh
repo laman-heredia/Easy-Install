@@ -32,5 +32,11 @@ redis_validate_line="$(grep -nF 'redis-server "$temp" --test-memory 2' "$ROOT/sc
 redis_install_line="$(grep -nF 'mv "$temp" "$CONF"' "$ROOT/scripts/redis.sh" | cut -d: -f1)"
 [[ -n "$redis_validate_line" && -n "$redis_install_line" && "$redis_validate_line" -le "$redis_install_line" ]] ||
   fail "Redis installs configuration before validating it"
+grep -Fq 'MySQL 新配置启动失败，已恢复原配置' "$ROOT/scripts/mysql.sh" ||
+  fail "MySQL configuration updates lack restart rollback"
+grep -Fq "CREATE USER '\${DB_USER}'@'%'" "$ROOT/scripts/mysql.sh" ||
+  fail "MySQL account creation uses unsafe or invalid quoting"
+grep -Fq '((${#ports[@]} > 0))' "$ROOT/scripts/ufw.sh" ||
+  fail "UFW accepts an empty port list"
 
 echo "Security regression tests passed"

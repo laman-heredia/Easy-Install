@@ -195,7 +195,7 @@ sudo ./nodejs.sh uninstall
 ```
 
 生成的 systemd unit 默认启用 `NoNewPrivileges`、`PrivateTmp` 和 `ProtectSystem=full`。
-建议把 Node.js 应用放在 Nginx/Caddy 反向代理之后，不要直接向公网暴露开发端口。
+建议把 Node.js 应用放在 Nginx 反向代理之后，不要直接向公网暴露开发端口。
 
 ## Ubuntu 一键初始化 UFW 防火墙
 

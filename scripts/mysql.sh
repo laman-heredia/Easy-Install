@@ -36,15 +36,15 @@ validate(){ [[ "$DB_NAME" =~ ^[A-Za-z_][A-Za-z0-9_]{0,63}$ ]] || die "数据库�
 root_ubuntu(){ ((EUID==0)) || die "请使用 sudo。"; source /etc/os-release; [[ ${ID:-} == ubuntu ]] || die "仅支持 Ubuntu。"; }
 confirm(){ [[ "$ASSUME_YES" == true ]] && return; read -r -p "$1 [Y/n] " a; [[ -z "$a" || "$a" =~ ^[Yy]$ ]]; }
 password(){ [[ -n "$DB_PASSWORD" ]] || DB_PASSWORD="$(openssl rand -base64 24 | tr -d '\n')"; }
-configure(){ local conf="/etc/mysql/mysql.conf.d/easy-install.cnf" temp; temp="$(mktemp /etc/mysql/mysql.conf.d/.easy-install.XXXXXX)"; cat >"$temp" <<EOF_CONF
+configure(){ local conf="/etc/mysql/mysql.conf.d/easy-install.cnf" temp backup=""; temp="$(mktemp /etc/mysql/mysql.conf.d/.easy-install.XXXXXX)"; cat >"$temp" <<EOF_CONF
 [mysqld]
 bind-address = ${BIND}
 port = ${PORT}
 local_infile = 0
 skip_name_resolve = ON
 EOF_CONF
-chmod 644 "$temp"; mv "$temp" "$conf"; mysqld --validate-config --defaults-extra-file="$conf" >/dev/null; systemctl restart mysql; }
-create_db(){ password; local exists; exists="$(mysql --batch --skip-column-names -e "SELECT COUNT(*) FROM mysql.user WHERE user='${DB_USER}' AND host='%';")"; if [[ "$exists" == 0 ]]; then mysql --execute="CREATE USER \`${DB_USER}\`@'%' IDENTIFIED BY '${DB_PASSWORD}';"; else [[ "$FORCE" == true ]] || die "用户已存在；使用 --force 更新密码。"; mysql --execute="ALTER USER \`${DB_USER}\`@'%' IDENTIFIED BY '${DB_PASSWORD}';"; fi; mysql --execute="CREATE DATABASE IF NOT EXISTS \`${DB_NAME}\` CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci; GRANT ALL PRIVILEGES ON \`${DB_NAME}\`.* TO \`${DB_USER}\`@'%'; FLUSH PRIVILEGES;"; ok "数据库：$DB_NAME；用户：$DB_USER；密码：$DB_PASSWORD"; }
+chmod 644 "$temp"; mysqld --defaults-extra-file="$temp" --validate-config >/dev/null; if [[ -e "$conf" ]]; then backup="$(mktemp /etc/mysql/mysql.conf.d/.easy-install-backup.XXXXXX)"; cp -a "$conf" "$backup"; fi; mv "$temp" "$conf"; if ! systemctl restart mysql; then if [[ -n "$backup" ]]; then mv "$backup" "$conf"; else rm -f "$conf"; fi; systemctl restart mysql || true; die "MySQL 新配置启动失败，已恢复原配置。"; fi; [[ -z "$backup" ]] || rm -f "$backup"; }
+create_db(){ password; local exists; exists="$(mysql --batch --skip-column-names -e "SELECT COUNT(*) FROM mysql.user WHERE user='${DB_USER}' AND host='%';")"; if [[ "$exists" == 0 ]]; then mysql --execute="CREATE USER '${DB_USER}'@'%' IDENTIFIED BY '${DB_PASSWORD}';"; else [[ "$FORCE" == true ]] || die "用户已存在；使用 --force 更新密码。"; mysql --execute="ALTER USER '${DB_USER}'@'%' IDENTIFIED BY '${DB_PASSWORD}';"; fi; mysql --execute="CREATE DATABASE IF NOT EXISTS \`${DB_NAME}\` CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci; GRANT ALL PRIVILEGES ON \`${DB_NAME}\`.* TO '${DB_USER}'@'%'; FLUSH PRIVILEGES;"; ok "数据库：$DB_NAME；用户：$DB_USER；密码：$DB_PASSWORD"; }
 install_mysql(){ root_ubuntu; validate; password; [[ "$BIND" == 127.0.0.1 || "$BIND" == localhost || "$BIND" == ::1 ]] || warn "远程 MySQL 暴露风险高，请仅向可信 CIDR 开放 TCP $PORT。"; confirm "安装 MySQL？" || die "已取消。"; export DEBIAN_FRONTEND=noninteractive; run apt-get update -q; run apt-get install -y mysql-server openssl; [[ "$DRY_RUN" == true ]] && { ok "演练完成；生成密码不会写入系统。"; return; }; systemctl enable --now mysql; configure; create_db; }
 create(){ root_ubuntu; validate; [[ "$DRY_RUN" != true ]] || die "create 不支持 --dry-run。"; create_db; }
 backup(){ root_ubuntu; validate; [[ "$DRY_RUN" != true ]] || die "backup 不支持 --dry-run。"; install -d -m 700 "$BACKUP_DIR"; local out; out="$BACKUP_DIR/${DB_NAME}-$(date -u +%Y%m%dT%H%M%SZ).sql.gz"; mysqldump --single-transaction --databases "$DB_NAME" | gzip -9 >"$out"; chmod 600 "$out"; ok "备份：$out"; }

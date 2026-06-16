@@ -9,5 +9,6 @@ if "$S" service --app-dir relative >/dev/null 2>&1; then fail app-dir; fi
 if "$S" service --service 'bad/name' >/dev/null 2>&1; then fail service-name; fi
 if "$S" service --start-cmd 'npm start; id' >/dev/null 2>&1; then fail start-cmd; fi
 if "$S" --port 0 >/dev/null 2>&1; then fail port; fi
+if ! "$S" service --dry-run --app-dir /srv/nonexistent --user www-data --service preview >/dev/null 2>&1; then fail dry-run-service-preview; fi
 if "$S" status --dry-run >/dev/null 2>&1; then fail dry-run-status; fi
 echo "Node.js CLI tests passed"
