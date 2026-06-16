@@ -137,6 +137,88 @@ sudo ./redis.sh uninstall --purge-data
 sudo ./redis.sh --remote --password 'very-long-random-secret'
 ```
 
+
+## Ubuntu 一键部署 MySQL
+
+默认安装 Ubuntu 仓库中的 MySQL，创建 `app` 数据库和独立应用用户：
+
+```bash
+curl -fsSLO https://raw.githubusercontent.com/laman-heredia/Easy-Install/main/scripts/mysql.sh
+chmod +x mysql.sh
+sudo ./mysql.sh
+```
+
+常用操作：
+
+```bash
+# 自定义数据库、用户和密码
+sudo ./mysql.sh --database production --user appuser \
+  --password 'use-a-long-random-password'
+
+# 创建更多数据库，或更新已有用户密码
+sudo ./mysql.sh create --database analytics --user analyst
+sudo ./mysql.sh create --database production --user appuser \
+  --password 'new-long-random-password' --force
+
+# 备份为 gzip 压缩 SQL
+sudo ./mysql.sh backup --database production --backup-dir /srv/backups/mysql
+
+sudo ./mysql.sh list
+sudo ./mysql.sh status
+sudo ./mysql.sh uninstall
+```
+
+MySQL 默认只监听本机。若使用 `--bind 0.0.0.0` 开启远程访问，请务必配合云安全组
+或 UFW 仅允许可信来源访问 TCP 3306。卸载默认保留 `/var/lib/mysql`，只有
+`--purge-data` 才会删除数据。
+
+## Ubuntu 一键部署 Node.js
+
+使用 NodeSource APT 仓库安装 Node.js，并可为已有应用生成 systemd 服务：
+
+```bash
+curl -fsSLO https://raw.githubusercontent.com/laman-heredia/Easy-Install/main/scripts/nodejs.sh
+chmod +x nodejs.sh
+sudo ./nodejs.sh --major 22
+```
+
+应用服务示例：
+
+```bash
+# 在 /srv/myapp 中运行 npm start，并注入 PORT=3000
+sudo ./nodejs.sh service --app-dir /srv/myapp --user www-data \
+  --service myapp --start-cmd 'npm start' --port 3000
+
+sudo ./nodejs.sh status --service myapp
+sudo journalctl -u myapp --no-pager -n 100
+sudo ./nodejs.sh uninstall
+```
+
+生成的 systemd unit 默认启用 `NoNewPrivileges`、`PrivateTmp` 和 `ProtectSystem=full`。
+建议把 Node.js 应用放在 Nginx/Caddy 反向代理之后，不要直接向公网暴露开发端口。
+
+## Ubuntu 一键初始化 UFW 防火墙
+
+适合在新服务器上快速建立“默认拒绝入站、允许出站、保留 SSH”的基础规则：
+
+```bash
+curl -fsSLO https://raw.githubusercontent.com/laman-heredia/Easy-Install/main/scripts/ufw.sh
+chmod +x ufw.sh
+sudo ./ufw.sh --ssh-port 22 --ports 80,443
+```
+
+常用操作：
+
+```bash
+# 放行多个服务端口，UDP 端口可带协议后缀
+sudo ./ufw.sh allow --ports 5432,6379,51820/udp
+
+sudo ./ufw.sh status
+sudo ./ufw.sh reset
+```
+
+启用防火墙前请确认实际 SSH 端口正确，并尽量先在云厂商安全组中保留紧急访问方式。
+
 ## Ubuntu 一键部署 WireGuard
 
 WireGuard 配置简单、性能优秀，特别适合手机、笔记本和服务器之间的日常 VPN
